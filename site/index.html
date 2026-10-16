@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux · GPU memory monitor for Windows</title>
+<meta name="description" content="A tiny Windows monitor for your graphics card's memory: how much is in use, which apps hold it, and a button to end one. Portable, no install, no admin.">
+<link rel="canonical" href="https://erik1028.github.io/Flux/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Erik1028">
+<meta property="og:url" content="https://erik1028.github.io/Flux/">
+<meta property="og:title" content="Flux">
+<meta property="og:description" content="A tiny Windows monitor for your graphics card's memory: how much is in use, which apps hold it, and a button to end one.">
+<meta property="og:image" content="https://erik1028.github.io/Flux/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0a0e0c">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Flux", "url": "https://erik1028.github.io/Flux/", "description": "A tiny Windows monitor for GPU video memory: usage against the card's real capacity, per-process VRAM with a safe way to end an app, a leak hunter, GPU load and temperatures, and a CPU/RAM/network/disk process view.", "image": "https://erik1028.github.io/Flux/og.png", "operatingSystem": "Windows 10, Windows 11", "applicationCategory": "UtilitiesApplication", "downloadUrl": "https://github.com/Erik1028/Flux/releases/latest", "isAccessibleForFree": true, "inLanguage": "en", "license": "https://opensource.org/licenses/MIT", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Person", "name": "Erik1028", "url": "https://github.com/Erik1028"}, "sameAs": ["https://github.com/Erik1028/Flux"]}</script>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-repo="Erik1028/Flux">
+
+<div class="band">
+<canvas class="trace" id="trace" aria-hidden="true"></canvas>
+<header class="top">
+<div class="wrap">
+<a class="logo" href="#top"><img src="favicon.png" width="30" height="30" alt="">Flux</a>
+<nav aria-label="Sections"><a class="opt" href="#features">Features</a><a href="#install">Download</a><a class="opt" href="https://github.com/Erik1028/Flux">GitHub</a></nav>
+</div>
+</header>
+
+<section class="intro wrap" id="top">
+<div class="pitch">
+<h1>Flux</h1>
+<p>A tiny Windows monitor for your graphics card's memory: how much is in use, which apps are holding it, and a <span class="x" aria-label="cross">✕</span> to end one and get it back.</p>
+<div class="get">
+<a class="btn" href="https://github.com/Erik1028/Flux/releases/latest" data-asset="^Flux\.exe$"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M6 10l6 6 6-6M4 21h16"/></svg>Download Flux.exe</a>
+<span class="mono" id="ver">latest release</span>
+<span class="alt">One portable file. No install, no admin.</span>
+</div>
+</div>
+<figure class="window">
+<img src="img/flux-vram.webp" width="720" height="696" alt="The Flux window: VRAM 8.9 of 15.9 GB with a sparkline, GPU load, GPU temperature, network, free and shared memory, CPU and RAM on the left, and the apps using video memory on the right, each with a bar and a cross to end it">
+<figcaption>The real window, fed made-up numbers.</figcaption>
+</figure>
+</section>
+</div>
+
+<main class="wrap">
+
+<section class="block" id="features">
+<h2>What it shows</h2>
+<div class="cards" data-stagger="90">
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 7v10M11 7v10M3 20h18"/></svg></div><h3>VRAM, out of the real total</h3><p>Video memory in use against your card's true capacity (the figure Windows' WMI reports stops at 4 GB), the session's peak, and memory the driver holds that no app owns.</p></article>
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M4 12h7M4 18h12M18 9l4 4M22 9l-4 4"/></svg></div><h3>Who's holding it</h3><p>Every app using video memory, biggest first, with a search box. The ✕ ends one: it asks first and checks it's still the same process; system processes get a lock instead.</p></article>
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-5 4 3 8-8M15 7h5v5"/></svg></div><h3>Leak hunter</h3><p>An amber ↑ marks an app whose VRAM keeps climbing. A sudden jump saves a list of every process, and a log every minute feeds an in-app report of peaks and climbs.</p></article>
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5M14 4v5"/></svg></div><h3>A small task manager</h3><p>Switch the list to CPU, RAM, network or disk to see who's busy there. Click a card on the left to jump to its list. Only the per-app network view needs administrator rights.</p></article>
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M10 13.5V5a2 2 0 1 1 4 0v8.5a4 4 0 1 1-4 0z"/></svg></div><h3>Load and temperatures</h3><p>GPU load and its busiest engines, power draw, core, hot-spot and memory temperature, clocks and fan speed, and your total download and upload.</p></article>
+<article class="card text"><div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg></div><h3>Stays out of the way</h3><p>Ctrl+Alt+V shows or hides it from anywhere. Pin it on top, or shrink it to a one-line strip. When VRAM passes your limit it pops up a note and beeps.</p></article>
+</div>
+</section>
+
+<section class="block two views" data-reveal>
+<div>
+<h2>One list, five views</h2>
+<p class="lede">VRAM, CPU, RAM, NET or DISK: the switch above the list changes what it counts, always busiest first, and the header shows how many apps and their total. Or fold the whole window into one line.</p>
+<figure class="strip"><img src="img/flux-mini.webp" width="360" height="44" alt="The one-line mini strip: 9.0 of 15.9 GB, 56 percent, GPU 68 percent, 61 degrees" loading="lazy"><figcaption>The mini strip: memory, GPU load and temperature in one line.</figcaption></figure>
+</div>
+<figure class="window small"><img src="img/flux-cpu.webp" width="720" height="696" alt="Flux with the process list switched to CPU, apps sorted by CPU use" loading="lazy"><figcaption>The CPU view, also made-up data.</figcaption></figure>
+</section>
+
+<section class="block two" id="install" data-reveal>
+<div><h2>Download</h2></div>
+<div>
+<ol>
+<li><a href="https://github.com/Erik1028/Flux/releases/latest" data-asset="^Flux\.exe$">Download Flux.exe<span class="size"></span></a>.</li>
+<li>Run it. There's nothing to install; put it anywhere. If Windows SmartScreen warns about the unsigned file: <em>More info → Run anyway</em>.</li>
+</ol>
+<p class="aside">Windows 10 or 11, any AMD, NVIDIA or Intel graphics card: memory and load come from Windows' own GPU counters. Temperatures, clocks and fan come from a bundled <a href="https://github.com/LibreHardwareMonitor/LibreHardwareMonitor">LibreHardwareMonitor</a> running in a separate process (made on an AMD card); if no sensor answers, that card just hides. Settings and the log live in <code>%LOCALAPPDATA%\Flux</code>. From source: <code>python vram_monitor.py</code> (Python 3 with Tkinter; temperatures also need pythonnet).</p>
+</div>
+</section>
+
+<section class="block" data-reveal>
+<h2>Latest update</h2>
+<div class="latest" id="latest"><span class="v">…</span><div><p><a href="https://github.com/Erik1028/Flux/releases">All releases</a></p></div></div>
+</section>
+
+</main>
+
+<footer>
+<div class="wrap">
+<p>Flux by <a href="https://github.com/Erik1028">Erik1028</a>. Free and open source, MIT license. GPU sensors by LibreHardwareMonitor (MPL-2.0).</p>
+<span><a href="https://erik1028.github.io/">More apps</a> · <a href="https://github.com/Erik1028/Flux">Source</a> · <a href="https://github.com/Erik1028/Flux/releases">Releases</a></span>
+</div>
+</footer>
+
+<script src="site.js"></script>
+<script src="trace.js"></script>
+<script src="motion.js"></script>
+</body>
+</html>
