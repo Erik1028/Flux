@@ -34,13 +34,16 @@ pythonnet or the DLLs are missing the app just hides the temp card and runs fine
 ## What it shows
 
 A frameless, custom-chrome window (drag the title bar; pin / minimise / maximise
-/ close are in-app) with metric cards on the left and processes on the right:
+/ close are in-app). The **title strip** carries the headline reading as a hero
+card — VRAM in use, %, the GPU and process count, the session peak, and a
+progress underline — with live metrics in a rail on the left and the processes
+card on the right:
 
 - **Click any metric card** to jump the process list to that view — the VRAM,
   NETWORK, CPU and RAM cards are shortcuts to their per-process breakdown.
-- **VRAM card** — dedicated VRAM in use vs. true card capacity, a % that turns
-  amber at 70% / red at 90%, a usage bar, a sparkline, and a ghost tick on the
-  bar marking the **session peak**.
+- **VRAM trend** — the shape of the last two minutes: a usage bar against the
+  card's true capacity, a sparkline, and a ghost tick marking the **session
+  peak** (the headline number itself lives in the title strip).
 - **GPU load card** — live **GPU utilization %**, **power draw (W)**, the busiest
   **engines** (3D / Video / Copy / Compute), and a sparkline.
 - **GPU temp card** — core temp and **hot-spot** (the number that actually
@@ -67,7 +70,10 @@ A frameless, custom-chrome window (drag the title bar; pin / minimise / maximise
   administrator rights (per-process network comes from an ETW kernel trace);
   without them it offers a one-click *restart elevated*. Everything else,
   including the total-throughput Network card, runs with no admin.
-- **Threshold alert** — a corner toast + beep when VRAM crosses the threshold.
+- **Threshold alerts** — a corner toast + beep when VRAM, GPU temperature or
+  hot-spot temperature crosses its threshold (each fires once, then re-arms
+  after it drops back), and optionally a taskbar flash so a minimised Flux still
+  gets your attention.
 - **Colour is earned** — a value is white while it is healthy and only turns
   amber/red when something is actually wrong, so a coloured number always means
   "look at this". Idle processes recede to grey, and processes that can't be
@@ -85,7 +91,8 @@ A frameless, custom-chrome window (drag the title bar; pin / minimise / maximise
 
 ### Settings & shortcuts
 
-- The **gear** button opens settings: refresh rate, alert threshold, accent
+- The **gear** button opens settings: refresh rate, the VRAM / GPU temp /
+  hot-spot alert thresholds (the top stop turns a temperature alert off), accent
   colour, and which cards to show. Window size/position is remembered.
 - **Ctrl + Alt + V** shows/hides the window from anywhere.
 - Frameless window: drag the title bar to move, drag the bottom-right grip to

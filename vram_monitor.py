@@ -889,6 +889,8 @@ def apply_accent(name):
 REFRESH_MS = 1000
 HISTORY = 120
 ALERT_PCT = 90            # toast + beep when VRAM crosses this
+TEMP_OFF = 101            # temp-alert slider top stop = alert disabled
+HOT_OFF = 111             # hotspot-alert slider top stop = alert disabled
 LEAK_GB = 1.5             # cached-with-no-owner above this → flag a possible leak
 LOG_EVERY = 60            # ticks (≈ seconds) between log rows
 
@@ -1045,7 +1047,8 @@ class Config:
     """Tiny JSON settings store in the per-user data dir, written atomically."""
     DEFAULTS = {"refresh_ms": 1000, "alert_pct": 90, "accent": "green",
                 "show_temp": True, "show_cpu": True, "show_net": True,
-                "geometry": None, "mini_geometry": None, "proc_mode": "vram"}
+                "geometry": None, "mini_geometry": None, "proc_mode": "vram",
+                "temp_alert": 85, "hotspot_alert": 100, "alert_flash": True}
 
     def __init__(self):
         _migrate_data_file("flux_config.json", "vrameter_config.json")
@@ -1313,6 +1316,11 @@ class App:
         # crash startup (int(None)) or busy-loop the UI (after(0)).
         self.refresh_ms = _clamp_int(self.cfg.get("refresh_ms"), 1000, 250, 5000)
         self.alert_pct = _clamp_int(self.cfg.get("alert_pct"), 90, 50, 100)
+        # temperature alerts; the top slider stop (TEMP_OFF/HOT_OFF) = disabled
+        self.temp_alert = _clamp_int(self.cfg.get("temp_alert"), 85, 60, TEMP_OFF)
+        self.hotspot_alert = _clamp_int(self.cfg.get("hotspot_alert"), 100, 70,
+                                        HOT_OFF)
+        self.alert_flash = bool(self.cfg.get("alert_flash"))
         self.show_cpu = bool(self.cfg.get("show_cpu"))
         self.show_net = bool(self.cfg.get("show_net"))
         self.show_temp_pref = bool(self.cfg.get("show_temp"))
@@ -1352,7 +1360,7 @@ class App:
         self._proc_hist = {}             # name -> deque of recent bytes (growth)
         self._growing = set()            # names whose VRAM keeps climbing
         self._cache_since = None
-        self._alerted = False
+        self._alerted = set()            # alert keys currently latched
         self._prev_used = 0
         self._snap_cooldown = 0
         self._tickn = 0
@@ -1364,7 +1372,7 @@ class App:
 
         root.title("Flux")
         root.configure(bg=BG)
-        cb = 248                              # top + VRAM + GPU-load cards
+        cb = 192                              # top + VRAM + GPU-load cards
         if self.temp_on:
             cb += 112
         if self.show_net:
@@ -1373,7 +1381,7 @@ class App:
         if self.show_cpu:
             cb += 58                          # CPU / RAM row
         cb += 40                              # cached note
-        w, h = 720, cb + 84
+        w, h = 720, cb + 110
         self._minw, self._minh = w, h
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         # Width is fixed by design; only the height + position are remembered.
@@ -1409,22 +1417,23 @@ class App:
         # Custom title bar (replaces the OS one) ---------------------------- #
         self._pinned = False
         self._maxed = False
-        tb = tk.Frame(root, bg=BG, height=40)
+        tb = tk.Frame(root, bg=BG, height=66)
         tb.pack(fill="x", side="top")
         tb.pack_propagate(False)
-        # Flux mark: two flowing waves (echoes the app icon), in the accent hue
-        logo = self._logo = tk.Canvas(tb, width=22, height=20, bg=BG,
+        # Identity: an app tile + the wordmark, then a hero card carrying the
+        # headline reading — the same title-strip rhythm as Prisma/Mixtape.
+        logo = self._logo = tk.Canvas(tb, width=30, height=30, bg=BG,
                                       highlightthickness=0)
-        logo.pack(side="left", padx=(14, 8))
+        logo.pack(side="left", padx=(14, 9))
+        self._round_rect(logo, 0, 2, 28, 30, 8, fill=PANEL, outline="")
         self._logo_hi = logo.create_line(
-            1, 8, 6, 5, 11, 8, 16, 11, 21, 8,
+            5, 13, 9, 10, 14, 13, 19, 16, 23, 13,
             fill=GPU_LINE, width=2, smooth=True, capstyle="round")
         self._logo_lo = logo.create_line(
-            1, 13, 6, 10, 11, 13, 16, 16, 21, 13,
+            5, 19, 9, 16, 14, 19, 19, 22, 23, 19,
             fill=ACCENT, width=2, smooth=True, capstyle="round")
-        title = tk.Label(tb, text="Flux", bg=BG, fg=FG,
-                         font=self.f_titlebar)
-        title.pack(side="left")
+        title = tk.Label(tb, text="Flux", bg=BG, fg=FG, font=self.f_title)
+        title.pack(side="left", padx=(0, 12))
         self._btn_close = self._winbtn(tb, "", self._close, close=True)
         self._btn_max = self._winbtn(tb, "", self._toggle_max)
         self._btn_min = self._winbtn(tb, "", self._minimize)
@@ -1432,7 +1441,12 @@ class App:
         self._winbtn(tb, "", self._open_settings)   # gear
         self._winbtn(tb, "", self._open_log)        # history / log
         self._winbtn(tb, "", self._enter_mini)  # collapse to mini strip
-        for wdg in (tb, title, logo):
+        # packed last so the window buttons above reserve their space first
+        self.hero = tk.Canvas(tb, height=52, bg=BG, highlightthickness=0, bd=0)
+        self.hero.pack(side="left", fill="x", expand=True, padx=(0, 12),
+                       pady=7)
+        self.hero.bind("<Configure>", lambda e: self._paint_hero())
+        for wdg in (tb, title, logo, self.hero):
             wdg.bind("<Button-1>", self._start_move)
             wdg.bind("<B1-Motion>", self._do_move)
             wdg.bind("<Double-Button-1>", lambda e: self._toggle_max())
@@ -1442,6 +1456,9 @@ class App:
         self.lbl_status = tk.Label(root, text="", bg=BG, fg=MUTED,
                                    font=self.f_small, anchor="w")
         self.lbl_status.pack(side="bottom", fill="x", padx=16, pady=(2, 8))
+        self._idle_status()
+        tk.Frame(root, bg=GRID, height=1).pack(side="bottom", fill="x",
+                                               padx=14)
 
         # Body: metric cards on the LEFT, processes on the RIGHT ------------- #
         body = tk.Frame(root, bg=BG)
@@ -1467,11 +1484,21 @@ class App:
         pbg.bind("<Configure>", lambda e: (
             pbg.delete("all"),
             self._round_rect(pbg, 1, 1, e.width - 1, e.height - 1, 14,
-                             fill=PANEL, outline="")))
+                             fill=PANEL, outline=GRID)))
         card = tk.Frame(holder, bg=PANEL)
         card.place(x=9, y=9, relwidth=1, relheight=1, width=-18, height=-18)
+        # Section caption row — the card names itself and reports its total,
+        # which also frees the whole selector row below it.
+        pcap = tk.Frame(card, bg=PANEL)
+        pcap.pack(fill="x", padx=8, pady=(9, 2))
+        tk.Label(pcap, text="PROCESSES", bg=PANEL, fg=MUTED,
+                 font=self.f_cap, anchor="w").pack(side="left")
+        self.lbl_prochead = tk.Label(pcap, text="", bg=PANEL, fg=MUTED,
+                                     font=self.f_cap, anchor="e")
+        self.lbl_prochead.pack(side="right")
+
         phead = tk.Frame(card, bg=PANEL)
-        phead.pack(fill="x", padx=6, pady=(8, 5))
+        phead.pack(fill="x", padx=6, pady=(2, 6))
         # segmented VRAM / CPU / RAM / NET / DISK selector — "mini task manager"
         self._seg = tk.Canvas(phead, width=205, height=24, bg=PANEL,
                               highlightthickness=0, bd=0, cursor="hand2")
@@ -1479,12 +1506,9 @@ class App:
         self._seg.bind("<Button-1>", self._seg_click)
         self._draw_seg()
         self._phead = phead
-        self.lbl_prochead = tk.Label(phead, text="", bg=PANEL, fg=MUTED,
-                                     font=self.f_cap, anchor="w")
-        self.lbl_prochead.pack(side="left", padx=(8, 0))
         # rounded search box: a borderless Entry embedded in a small rounded
         # canvas whose outline turns accent-coloured on focus.
-        sbox = tk.Canvas(phead, width=80, height=26, bg=PANEL,
+        sbox = tk.Canvas(phead, width=132, height=26, bg=PANEL,
                          highlightthickness=0, bd=0)
         sbox.pack(side="right")
         self._search_box = sbox
@@ -1492,7 +1516,7 @@ class App:
         self.search = tk.Entry(sbox, bg=TRACK, fg=FG, insertbackground=FG,
                                font=self.f_small, relief="flat", bd=0,
                                highlightthickness=0)
-        sbox.create_window(10, 13, window=self.search, anchor="w", width=62,
+        sbox.create_window(12, 13, window=self.search, anchor="w", width=110,
                            height=18)
         self.search.bind("<KeyRelease>", self._on_search)
         self.search.bind("<FocusIn>", lambda e: self._draw_search_box(True))
@@ -1687,7 +1711,7 @@ class App:
         for x0, y0, x1, y1, m, item in self._card_regions:
             if m in (mode, self._card_hover):
                 try:
-                    c.itemconfig(item, fill=PANEL_HOVER if m == mode else PANEL)
+                    c.itemconfig(item, fill=PANEL_HOVER if m == mode else BG)
                 except tk.TclError:
                     pass
         self._card_hover = mode
@@ -1832,18 +1856,9 @@ class App:
         n = len(procs)
         txt = str(n)
         if procs:
-            tot = self._fmt_val(sum(v for _, v, _ in procs))
-            try:
-                room = (self._phead.winfo_width() - self._seg.winfo_width()
-                        - self._search_box.winfo_width() - 20)
-                for cand in ("{} · Σ {}".format(n, tot),
-                             "{} · {}".format(n, tot),
-                             "Σ {}".format(tot)):
-                    if self.f_cap.measure(cand) <= room:
-                        txt = cand
-                        break
-            except Exception:
-                pass
+            # its own caption row, so the total always fits
+            txt = "{} · Σ {}".format(
+                n, self._fmt_val(sum(v for _, v, _ in procs)))
         self.lbl_prochead.config(text=txt)
 
     def _refresh_active_procs(self):
@@ -1965,13 +1980,16 @@ class App:
             tk.Label(pad, text=text, bg=BG, fg=MUTED,
                      font=self.f_cap).pack(anchor="w", pady=(10, 2))
 
-        def mkscale(frm, lo, hi, step, val, fmt, cb):
-            # Custom rounded slider (rounded track + circular thumb) — tk.Scale
-            # has a blocky trough/handle that can't be rounded.
+        def mkscale(frm, label, lo, hi, step, val, fmt, cb):
+            # One row — label | track | right-aligned value — so a stack of
+            # them reads as a table. Custom rounded slider because tk.Scale
+            # has a blocky trough/handle that cannot be rounded.
             wrap = tk.Frame(frm, bg=BG)
-            wrap.pack(fill="x")
+            wrap.pack(fill="x", pady=4)
+            tk.Label(wrap, text=label, bg=BG, fg=MUTED, font=self.f_mid,
+                     width=13, anchor="w").pack(side="left")
             out = tk.Label(wrap, text=fmt(val), bg=BG, fg=FG, font=self.f_stat,
-                           width=8, anchor="e")
+                           width=7, anchor="e")
             out.pack(side="right")
             sc = tk.Canvas(wrap, height=24, bg=BG, highlightthickness=0, bd=0)
             sc.pack(side="left", fill="x", expand=True)
@@ -2009,15 +2027,27 @@ class App:
             sc.bind("<B1-Motion>", lambda e: setpx(e.x))
             return sc
 
-        cap("REFRESH RATE")
-        mkscale(pad, 250, 5000, 250, self.refresh_ms,
+        cap("TUNING")
+        mkscale(pad, "Refresh rate", 250, 5000, 250, self.refresh_ms,
                 lambda v: f"{v/1000:.2f}s",
                 lambda v: (setattr(self, "refresh_ms", int(v)),
-                           self._cfg_debounced("refresh_ms", int(v))))
-        cap("ALERT THRESHOLD")
-        mkscale(pad, 50, 100, 1, self.alert_pct, lambda v: f"{v:.0f}%",
+                           self._cfg_debounced("refresh_ms", int(v)),
+                           self._status_after is None
+                           and self._idle_status()))
+
+        cap("ALERTS")
+        mkscale(pad, "VRAM", 50, 100, 1, self.alert_pct, lambda v: f"{v:.0f}%",
                 lambda v: (setattr(self, "alert_pct", int(v)),
                            self._cfg_debounced("alert_pct", int(v))))
+        if self.sensors.ok:
+            mkscale(pad, "GPU temp", 60, TEMP_OFF, 1, self.temp_alert,
+                    lambda v: "Off" if v >= TEMP_OFF else f"{v:.0f}°C",
+                    lambda v: (setattr(self, "temp_alert", int(v)),
+                               self._cfg_debounced("temp_alert", int(v))))
+            mkscale(pad, "Hotspot", 70, HOT_OFF, 1, self.hotspot_alert,
+                    lambda v: "Off" if v >= HOT_OFF else f"{v:.0f}°C",
+                    lambda v: (setattr(self, "hotspot_alert", int(v)),
+                               self._cfg_debounced("hotspot_alert", int(v))))
 
         cap("ACCENT")
         sw = tk.Frame(pad, bg=BG)
@@ -2077,6 +2107,9 @@ class App:
                      font=self.f_cap).pack(anchor="w")
         chk("CPU / RAM card", self._v_cpu, "show_cpu", "show_cpu")
         chk("Network card", self._v_net, "show_net", "show_net")
+        self._v_flash = tk.BooleanVar(value=self.alert_flash)
+        chk("Flash taskbar on alert", self._v_flash, "alert_flash",
+            "alert_flash")
 
     def _set_accent(self, name):
         apply_accent(name)
@@ -2086,6 +2119,7 @@ class App:
         self._logo.itemconfig(self._logo_hi, fill=GPU_LINE)
         self._logo.itemconfig(self._logo_lo, fill=ACCENT)
         self._draw_seg()                  # the active pill is accent-filled
+        self._paint_hero()
         self._paint_cards()
 
     def _open_log(self):
@@ -2165,6 +2199,15 @@ class App:
     def _card(self, c, x0, y0, x1, y1):
         return self._round_rect(c, x0, y0, x1, y1, 9, fill=PANEL, tags="fg")
 
+    def _rail(self, c, x0, y0, x1, y1, sep=True):
+        """A rail section instead of a boxed card: flat against the window, a
+        hairline above it for grouping. It is still filled (with the window
+        colour) so the hover tint has something to recolour in place."""
+        if sep:
+            c.create_line(x0 + 2, y0 - 6, x1 - 2, y0 - 6, fill=GRID, tags="fg")
+        return self._round_rect(c, x0, y0, x1, y1, 9, fill=BG, outline="",
+                                tags="fg")
+
     def _spark(self, c, data, x0, y0, x1, y1, color):
         if x1 - x0 < 4 or len(data) < 2:
             return
@@ -2214,12 +2257,50 @@ class App:
                           anchor="w", fill=MUTED, font=ufont, tags="fg")
 
     def _mini(self, c, x0, y, x1, label, value, vcol=FG, unit=""):
-        item = self._card(c, x0, y, x1, y + 50)
+        item = self._rail(c, x0, y, x1, y + 50, sep=False)
         c.create_text(x0 + 12, y + 15, text=label, anchor="w", fill=MUTED,
                       font=self.f_cap, tags="fg")
         self._bignum(c, x0 + 12, y + 40, value, unit, self.f_stat, self.f_cap,
                      vcol)
         return item
+
+    def _paint_hero(self):
+        """The headline reading as a title-strip card: swatch, value, context,
+        right-hand figures and a progress underline (the VRAM bar)."""
+        c = getattr(self, "hero", None)
+        if c is None:
+            return
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height() or 52
+        if w < 80:
+            return
+        d = self.last or {}
+        used = d.get("dedicated", 0)
+        pct = (used / self.total * 100) if self.total else 0
+        col = usage_color(pct)
+
+        self._round_rect(c, 0, 0, w, h, 10, fill=PANEL, outline="")
+        self._round_rect(c, 9, (h - 22) / 2, 31, (h + 22) / 2, 6,
+                         fill=col, outline="")
+        c.create_text(42, 17, anchor="w", text=f"{fmt_gb(used)} GB in use",
+                      fill=FG, font=self.f_titlebar)
+        nproc = d.get("nproc", 0)
+        c.create_text(42, 33, anchor="w", fill=MUTED, font=self.f_cap,
+                      text=f"{self.gpu_name} · {nproc} process"
+                           f"{'' if nproc == 1 else 'es'}")
+        c.create_text(w - 12, 17, anchor="e", text=f"{pct:.0f}%",
+                      fill=state_color(pct), font=self.f_titlebar)
+        if self._peak:
+            c.create_text(w - 12, 33, anchor="e", fill=MUTED, font=self.f_cap,
+                          text=f"peak {fmt_gb(self._peak)} GB"
+                               if self.total else "")
+        # progress underline, inset like Prisma's now-playing strip
+        by0, by1 = h - 8, h - 5
+        self._round_rect(c, 9, by0, w - 9, by1, 2, fill=TRACK, outline="")
+        fw = (w - 18) * min(pct, 100) / 100
+        if fw > 3:
+            self._round_rect(c, 9, by0, 9 + fw, by1, 2, fill=col, outline="")
 
     def _paint_cards(self):
         if self._resize_after is not None:
@@ -2245,26 +2326,18 @@ class App:
         gap = 10
         midx = (x0 + x1) / 2
 
-        # identity text stays quiet — the live numbers own the first glance
-        c.create_text(x0 + 2, 14, text=self.gpu_name.upper(), anchor="w",
-                      fill=MUTED, font=self.f_cap, tags="fg")
-
-        # --- VRAM card ---
-        y = 30
-        y1 = y + 112
+        # --- VRAM trend card (the headline itself lives in the title-strip
+        # hero, so this card carries the shape of the last two minutes) ---
+        y = 8
+        y1 = y + 78
         self._card_regions.append(
-            (x0, y, x1, y1, "vram", self._card(c, x0, y, x1, y1)))
-        c.create_text(x0 + 12, y + 17, text="VRAM", anchor="w", fill=MUTED,
+            (x0, y, x1, y1, "vram", self._rail(c, x0, y, x1, y1, sep=False)))
+        c.create_text(x0 + 12, y + 16, text="VRAM", anchor="w", fill=MUTED,
                       font=self.f_cap, tags="fg")
-        c.create_text(x1 - 12, y + 16, text=f"{pct:.0f}%", anchor="e",
-                      fill=state_color(pct), font=self.f_stat, tags="fg")
-        if self._peak:
-            c.create_text(x1 - 12, y + 33, text=f"peak {fmt_gb(self._peak)} GB",
-                          anchor="e", fill=MUTED, font=self.f_cap, tags="fg")
-        self._bignum(c, x0 + 12, y + 56, fmt_gb(used),
-                     f"/ {fmt_gb(self.total)} GB", self.f_cardnum,
-                     self.f_small)
-        bx0, bx1, by = x0 + 12, x1 - 12, y + 66
+        c.create_text(x1 - 12, y + 16, anchor="e", fill=MUTED,
+                      font=self.f_cap, tags="fg",
+                      text=f"{fmt_gb(used)} / {fmt_gb(self.total)} GB")
+        bx0, bx1, by = x0 + 12, x1 - 12, y + 28
         self._round_rect(c, bx0, by, bx1, by + 7, 3, fill=TRACK, tags="fg")
         fw = (bx1 - bx0) * min(pct, 100) / 100
         if fw > 3:
@@ -2273,12 +2346,12 @@ class App:
             tx = bx0 + (bx1 - bx0) * min(self._peak / self.total, 1.0)
             c.create_line(tx, by - 2, tx, by + 9, width=2,
                           fill=self._tint(ACCENT_WARN, PANEL), tags="fg")
-        self._spark(c, list(self.hist_vram), bx0, y + 82, bx1, y1 - 8, ACCENT)
+        self._spark(c, list(self.hist_vram), bx0, y + 44, bx1, y1 - 8, ACCENT)
         y = y1 + gap
 
         # --- GPU LOAD card (+ power, + per-engine breakdown) ---
         y1 = y + 86
-        self._card(c, x0, y, x1, y1)
+        self._rail(c, x0, y, x1, y1)
         c.create_text(x0 + 12, y + 17, text="GPU LOAD", anchor="w", fill=MUTED,
                       font=self.f_cap, tags="fg")
         self._bignum(c, x0 + 12, y + 54, f"{gpu:.0f}", "%", self.f_cardnum,
@@ -2300,7 +2373,7 @@ class App:
         # --- GPU TEMP card (optional, with its own trend) ---
         if self.temp_on:
             y1 = y + 102
-            self._card(c, x0, y, x1, y1)
+            self._rail(c, x0, y, x1, y1)
             c.create_text(x0 + 12, y + 17, text="GPU TEMP", anchor="w",
                           fill=MUTED, font=self.f_cap, tags="fg")
             temp = s.get("temp")
@@ -2338,7 +2411,7 @@ class App:
         if self.show_net:
             y1 = y + 86
             self._card_regions.append(
-                (x0, y, x1, y1, "net", self._card(c, x0, y, x1, y1)))
+                (x0, y, x1, y1, "net", self._rail(c, x0, y, x1, y1)))
             c.create_text(x0 + 12, y + 17, text="NETWORK", anchor="w",
                           fill=MUTED, font=self.f_cap, tags="fg")
             base, aw = y + 50, self.f_small.measure("↓") + 6
@@ -2358,7 +2431,8 @@ class App:
             self._net_spark(c, x0 + 12, y + 60, x1 - 12, y1 - 8)
             y = y1 + gap
 
-        # --- FREE / SHARED (+ CPU / RAM) mini-cards ---
+        # --- FREE / SHARED (+ CPU / RAM) stat tiles ---
+        c.create_line(x0 + 2, y - 6, x1 - 2, y - 6, fill=GRID, tags="fg")
         self._mini(c, x0, y, midx - gap / 2, "FREE", fmt_gb(free), unit="GB")
         self._mini(c, midx + gap / 2, y, x1, "SHARED", fmt_gb(shared),
                    unit="GB")
@@ -2638,8 +2712,16 @@ class App:
         self.lbl_status.config(text=text, fg=color)
         if self._status_after:
             self.root.after_cancel(self._status_after)
-        self._status_after = self.root.after(
-            5000, lambda: self.lbl_status.config(text=""))
+        self._status_after = self.root.after(5000, self._idle_status)
+
+    def _idle_status(self):
+        """The footer's resting line, so the strip never sits empty between
+        messages: what Flux is doing, and the hotkey nobody can discover."""
+        self._status_after = None
+        self.lbl_status.config(
+            fg=MUTED, text=f"●  Live  ·  every "
+                           f"{self.refresh_ms / 1000:.1f} s  ·  "
+                           f"Ctrl+Alt+V to show / hide")
 
     # -- loop -------------------------------------------------------------- #
     def refresh(self):
@@ -2718,17 +2800,19 @@ class App:
             self._snap_cooldown = 30
         self._prev_used = used
 
-        # threshold alert (rising edge, with hysteresis)
-        if pct >= self.alert_pct and not self._alerted:
-            self._alerted = True
-            self._toast(f"VRAM at {pct:.0f}%  —  "
-                        f"{fmt_gb(used)} / {fmt_gb(self.total)} GB")
-            try:
-                winsound.MessageBeep(0x30)
-            except Exception:
-                pass
-        elif pct < self.alert_pct - 5:
-            self._alerted = False
+        # threshold alerts (rising edge, with hysteresis)
+        self._check_alert("vram", pct, self.alert_pct, 5,
+                          lambda: f"VRAM at {pct:.0f}%  —  "
+                                  f"{fmt_gb(used)} / {fmt_gb(self.total)} GB")
+        s = self.sensors_data if self.sensors.ok else {}
+        if self.temp_alert < TEMP_OFF:
+            t = s.get("temp")
+            self._check_alert("temp", t, self.temp_alert, 5,
+                              lambda: f"GPU temperature {t:.0f}°C")
+        if self.hotspot_alert < HOT_OFF:
+            h = s.get("hotspot")
+            self._check_alert("hotspot", h, self.hotspot_alert, 5,
+                              lambda: f"GPU hotspot {h:.0f}°C", ACCENT_HOT)
 
         # periodic log row
         if self._tickn % LOG_EVERY == 1:
@@ -2741,6 +2825,7 @@ class App:
             return                        # minimised / hidden — skip the repaint
         self._refresh_active_procs()
         self._update_prochead()
+        self._paint_hero()
         self._paint_cards()
         self._draw_procs()
 
@@ -2819,6 +2904,43 @@ class App:
                     f.writelines(lines[:1])            # header
                     f.writelines(lines[-20000:])
                 os.replace(tmp, self._log_path)
+        except Exception:
+            pass
+
+    def _check_alert(self, key, value, limit, hyst, msg, color=None):
+        """Fire once when `value` reaches `limit`; re-arm below limit - hyst.
+        A missing reading (None) leaves the latch alone."""
+        if value is None:
+            return
+        if value >= limit and key not in self._alerted:
+            self._alerted.add(key)
+            self._toast(msg(), color)
+            try:
+                winsound.MessageBeep(0x30)
+            except Exception:
+                pass
+            if self.alert_flash:
+                self._flash_taskbar()
+        elif value < limit - hyst:
+            self._alerted.discard(key)
+
+    def _flash_taskbar(self):
+        """Flash Flux's taskbar button until it is brought to the front. Only
+        meaningful while the main window has a taskbar button (not withdrawn
+        into mini mode / hidden by the hotkey)."""
+        try:
+            if self._mini_on or self.root.state() == "withdrawn":
+                return
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
+                            ("dwFlags", ctypes.c_uint),
+                            ("uCount", ctypes.c_uint),
+                            ("dwTimeout", ctypes.c_uint)]
+            # FLASHW_ALL (3) | FLASHW_TIMERNOFG (12): flash until foreground
+            fi = FLASHWINFO(ctypes.sizeof(FLASHWINFO), _hwnd(self.root), 3 | 12,
+                            0, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(fi))
         except Exception:
             pass
 
