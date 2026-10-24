@@ -411,32 +411,42 @@ class RateSampler:
     ones — and reopening it every read cost 32.5 ms vs 8.3 ms across ~390
     \\Process(*) instances. So it is only reopened to self-heal a failure."""
 
-    def __init__(self, path):
+    def __init__(self, path, *more):
+        # Extra paths share the SAME query, so one collect serves all of them
+        # (download + upload of the network card were two collects a tick).
         self.path = path
+        self.paths = (path,) + more
         self._primed = None
 
     def _open_primed(self):
         q = wintypes.HANDLE()
         if pdh.PdhOpenQueryW(None, None, ctypes.byref(q)) != ERROR_SUCCESS:
             return None
-        c = wintypes.HANDLE()
-        if pdh.PdhAddEnglishCounterW(q, self.path, None,
-                                     ctypes.byref(c)) != ERROR_SUCCESS:
-            pdh.PdhCloseQuery(q)
-            return None
+        cs = []
+        for p in self.paths:
+            c = wintypes.HANDLE()
+            if pdh.PdhAddEnglishCounterW(q, p, None,
+                                         ctypes.byref(c)) != ERROR_SUCCESS:
+                pdh.PdhCloseQuery(q)
+                return None
+            cs.append(c)
         pdh.PdhCollectQueryData(q)        # first sample (prime)
-        return (q, c)
+        return (q, cs)
 
-    def read(self):
+    def read_all(self):
+        """One list per path, from a single collect."""
         if self._primed is None:
             self._primed = self._open_primed()
-            return []                     # the first read only primes the query
-        q, c = self._primed
+            return [[] for _ in self.paths]   # the first read only primes
+        q, cs = self._primed
         if pdh.PdhCollectQueryData(q) != ERROR_SUCCESS:
             pdh.PdhCloseQuery(q)          # drop it; the next read re-primes
             self._primed = None
-            return []
-        return _read_double_array(c)
+            return [[] for _ in self.paths]
+        return [_read_double_array(c) for c in cs]
+
+    def read(self):
+        return self.read_all()[0]
 
 
 def gpu_utilization(sampler):
@@ -551,11 +561,13 @@ def _net_real(pairs):
             if n and not any(s in n.lower() for s in _NET_SKIP)}
 
 
-def net_rates(rx_sampler, tx_sampler):
+def net_rates(sampler):
     """(rx_bytes_s, tx_bytes_s) for the busiest real interface — one adapter,
-    so mirrored virtual-adapter traffic isn't counted twice."""
-    rx = _net_real(rx_sampler.read())
-    tx = _net_real(tx_sampler.read())
+    so mirrored virtual-adapter traffic isn't counted twice. `sampler` holds
+    both counters in one query (one collect per tick)."""
+    rx_raw, tx_raw = sampler.read_all()
+    rx = _net_real(rx_raw)
+    tx = _net_real(tx_raw)
     names = set(rx) | set(tx)
     if not names:
         return 0.0, 0.0
@@ -1268,6 +1280,83 @@ class _HotkeyThread(threading.Thread):
                 self.flag.set()
 
 
+def _flat(args):
+    out = []
+    for a in args:
+        if isinstance(a, (list, tuple)):
+            out.extend(_flat(a))
+        else:
+            out.append(a)
+    return out
+
+
+class _RetainedCanvas:
+    """Lets immediate-mode paint code (delete everything, create it again)
+    keep its canvas items. Between begin() and end(), the k-th create_* call
+    reuses the k-th item of the previous paint when it is the same kind with
+    the same option names, and only sends Tk the coords/options that actually
+    changed — most of a card (captions, frames, hairlines) never does. Fewer Tk
+    calls, and Tk only repaints the regions that changed instead of the whole
+    canvas. Anything else is forwarded to the real canvas."""
+
+    def __init__(self, canvas):
+        self._c = canvas
+        self._prev, self._cur = [], []
+        self._restack = False
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def begin(self):
+        self._prev, self._cur = self._cur, []
+        self._restack = False
+
+    def end(self):
+        for _kind, iid, _a, _o in self._prev[len(self._cur):]:
+            if iid is not None:
+                self._c.delete(iid)
+        self._prev = []
+        if self._restack:               # an item was created mid-sequence (a
+            for _kind, iid, _a, _o in self._cur:    # card appeared or went):
+                self._c.tag_raise(iid)  # restore paint order = stacking order
+
+    def _make(self, kind, args, opts):
+        coords = tuple(_flat(args))
+        i = len(self._cur)
+        if i < len(self._prev):
+            pkind, iid, pcoords, popts = self._prev[i]
+            if pkind == kind and popts.keys() == opts.keys():
+                if pcoords != coords:
+                    self._c.coords(iid, *coords)
+                changed = {k: v for k, v in opts.items() if popts[k] != v}
+                if changed:
+                    self._c.itemconfigure(iid, **changed)
+                self._cur.append((kind, iid, coords, opts))
+                return iid
+            if iid is not None:
+                self._c.delete(iid)
+            self._prev[i] = (None, None, None, None)
+            self._restack = True
+        iid = getattr(self._c, "create_" + kind)(*coords, **opts)
+        self._cur.append((kind, iid, coords, opts))
+        return iid
+
+    def create_text(self, *a, **kw):
+        return self._make("text", a, kw)
+
+    def create_line(self, *a, **kw):
+        return self._make("line", a, kw)
+
+    def create_polygon(self, *a, **kw):
+        return self._make("polygon", a, kw)
+
+    def create_oval(self, *a, **kw):
+        return self._make("oval", a, kw)
+
+    def create_rectangle(self, *a, **kw):
+        return self._make("rectangle", a, kw)
+
+
 class _Scrollbar(tk.Canvas):
     """Slim, themed vertical scrollbar wired to a target canvas's yview."""
 
@@ -1336,8 +1425,7 @@ class App:
         self.cpu_sampler = RateSampler(CPU_COUNTER)
         self.proc_cpu_sampler = RateSampler(PROC_CPU_COUNTER)  # per-process CPU
         self.proc_disk_sampler = RateSampler(PROC_DISK_COUNTER)  # per-process I/O
-        self.net_rx_sampler = RateSampler(NET_RX_COUNTER)
-        self.net_tx_sampler = RateSampler(NET_TX_COUNTER)
+        self.net_sampler = RateSampler(NET_RX_COUNTER, NET_TX_COUNTER)
         self.net_rx = self.net_tx = 0.0
         self._ncpu = os.cpu_count() or 1
         self._proc_mode = self.cfg.get("proc_mode")   # vram|cpu|ram|net|disk
@@ -1445,6 +1533,7 @@ class App:
         self.hero = tk.Canvas(tb, height=52, bg=BG, highlightthickness=0, bd=0)
         self.hero.pack(side="left", fill="x", expand=True, padx=(0, 12),
                        pady=7)
+        self._hero_rc = _RetainedCanvas(self.hero)
         self.hero.bind("<Configure>", lambda e: self._paint_hero())
         for wdg in (tb, title, logo, self.hero):
             wdg.bind("<Button-1>", self._start_move)
@@ -1469,6 +1558,7 @@ class App:
                                bg=BG)
         self.cards.pack(side="left", fill="y")
         self.cards.bind("<Configure>", self._on_cards_resize)
+        self._cards_rc = _RetainedCanvas(self.cards)
         # the left column was dead surface — now each card jumps to its view
         self.cards.bind("<Motion>", self._cards_motion)
         self.cards.bind("<Leave>", lambda e: self._cards_motion(None))
@@ -1544,6 +1634,9 @@ class App:
         self._card_hover = None          # hovered card's MODE (survives repaint)
         self._seg_anim = None            # pill-slide after() handle
         self._hover_xf = False           # cursor directly over a ✕ mark
+        self._row_items = {}             # row index -> (row signature, item ids)
+        self._rows_geo = None            # width/mode/theme the rows were drawn for
+        self._plist_sr = None            # last scrollregion set on the list
         self.plist.bind_all("<MouseWheel>", self._on_wheel)
         self.plist.bind("<Configure>", self._on_plist_config)
         self.plist.bind("<Button-1>", self._plist_click)
@@ -1734,7 +1827,9 @@ class App:
     def _winbtn(self, parent, glyph, cmd, close=False, pin=False):
         b = tk.Label(parent, text=glyph, font=self.f_icon, bg=BG, fg=MUTED,
                      width=4)
-        b.pack(side="right", fill="y")
+        # compact and vertically centred — filling the 66px title strip made
+        # them (and the red close hover) tall, stretched slabs
+        b.pack(side="right", ipady=7, padx=(0, 8 if close else 1))
         hbg = "#c42b1c" if close else PANEL_HOVER
         hfg = "#ffffff" if close else FG
         b.bind("<Enter>", lambda e: b.config(bg=hbg, fg=hfg))
@@ -2267,13 +2362,14 @@ class App:
     def _paint_hero(self):
         """The headline reading as a title-strip card: swatch, value, context,
         right-hand figures and a progress underline (the VRAM bar)."""
-        c = getattr(self, "hero", None)
+        c = getattr(self, "_hero_rc", None)
         if c is None:
             return
-        c.delete("all")
+        c.begin()
         w = c.winfo_width()
         h = c.winfo_height() or 52
         if w < 80:
+            c.end()
             return
         d = self.last or {}
         used = d.get("dedicated", 0)
@@ -2301,17 +2397,18 @@ class App:
         fw = (w - 18) * min(pct, 100) / 100
         if fw > 3:
             self._round_rect(c, 9, by0, 9 + fw, by1, 2, fill=col, outline="")
+        c.end()
 
     def _paint_cards(self):
         if self._resize_after is not None:
             self.root.after_cancel(self._resize_after)   # else a 2nd chain runs
         self._resize_after = None
         self._last_paint = time.monotonic()
-        c = self.cards
+        c = self._cards_rc
         w = c.winfo_width()
         if w <= 1:
             w = 300
-        c.delete("fg")
+        c.begin()
         self._card_regions = []
         d = self.last or {}
         used = d.get("dedicated", 0)
@@ -2452,7 +2549,8 @@ class App:
                            unit=f"/ {gb(ramt):.0f} GB" if ramt else "")))
             y += 50 + 8
 
-        # the card polys are recreated each paint, so re-apply the hover tint
+        # the paint sets every rail back to its resting fill (and a layout
+        # change can move a card to another item), so re-apply the hover tint
         if self._card_hover:
             for _x0, _y0, _x1, _y1, m, item in self._card_regions:
                 if m == self._card_hover:
@@ -2471,6 +2569,7 @@ class App:
             c.create_text(x0 + 2, y + 27,
                           text="no app owns it — Win+Ctrl+Shift+B to flush",
                           anchor="w", fill=MUTED, font=self.f_small, tags="fg")
+        c.end()
 
     ROWH = 24
 
@@ -2587,20 +2686,22 @@ class App:
             f = self.filter.lower()
             procs = [p for p in procs if f in p[0].lower()]
         c = self.plist
-        c.delete("all")
         w = c.winfo_width()
         if w < 60:
             w = 380
         self._proc_list = []
-        self._xitems = {}
         self._filtered = procs
         self._show_growth = mode == "vram"
         if not procs:
+            c.delete("all")                  # empty state: nothing to reuse
+            self._row_items, self._rows_geo, self._xitems = {}, None, {}
+            self._plist_sr = None
             if mode == "net" and not self.net_etw.ok and not self.filter:
                 c.create_text(2, 14, anchor="w", fill=ACCENT_WARN,
-                              font=self.f_small,
+                              font=self.f_small, tags="empty",
                               text="Per-process network needs administrator.")
                 c.create_text(2, 36, anchor="w", fill=ACCENT, font=self.f_small,
+                              tags="empty",
                               text="↻  Click here to restart Flux elevated")
                 c.configure(scrollregion=(0, 0, w, self.ROWH * 2))
                 return
@@ -2617,25 +2718,32 @@ class App:
             else:
                 msg = "No GPU memory in use"
             c.create_text(2, 14, anchor="w", fill=MUTED, font=self.f_small,
-                          text=msg)
+                          text=msg, tags="empty")
             c.configure(scrollregion=(0, 0, w, self.ROWH))
             return
+        c.delete("empty")                    # leaving the empty state
         self._maxv = procs[0][1] or 1
         self._proc_list = [(n, v, p, n.lower() in CRITICAL_PROCESSES)
                            for n, v, p in procs]
-        c.configure(scrollregion=(0, 0, w, len(procs) * self.ROWH + 4))
+        sr = (0, 0, w, len(procs) * self.ROWH + 4)
+        if sr != self._plist_sr:
+            self._plist_sr = sr
+            c.configure(scrollregion=sr)
         self._redraw_rows()
 
     def _redraw_rows(self):
-        """Draw only the rows in the viewport (± a small buffer). The list can be
-        100+ long; drawing all of them every tick cost ~14 ms — this is ~2 ms."""
+        """Draw only the rows in the viewport (± a small buffer), and of those
+        only the ones whose content changed since the last tick. Each row keeps
+        a signature of exactly what it shows (name, value text, bar pixels,
+        state); a row that would look the same keeps its canvas items. Deleting
+        and re-creating every visible row each tick (~120 items) was the
+        biggest per-tick cost of the list. A width, mode or theme change
+        rebuilds everything. The kill mark's hover colour is not part of the
+        signature: _plist_hover recolours that item in place."""
         procs = self._filtered
         if not procs:
             return
         c = self.plist
-        c.delete("row")
-        c.delete("hl")
-        self._xitems = {}
         w = c.winfo_width()
         if w < 60:
             w = 380
@@ -2647,32 +2755,58 @@ class App:
         vh = c.winfo_height() or 1
         first = max(0, int(top // rh) - 2)
         last = min(len(procs), int((top + vh) // rh) + 3)
+
+        geo = (w, rh, self._proc_mode, self._show_growth,
+               ACCENT, ACCENT_WARN, ACCENT_HOT)
+        if geo != self._rows_geo:
+            c.delete("row")
+            self._row_items = {}
+            self._rows_geo = geo
+        old_items, new_items = self._row_items, {}
         for i in range(first, last):
             name, val, pids = procs[i]
             crit = self._proc_list[i][3]
             idle = self._row_idle(val)
+            grow = self._show_growth and name in self._growing
+            txt = self._fmt_val(val)
+            fw = int((bx1 - bx0) * val / maxv) if (bx1 > bx0 and not idle) else -1
+            sig = (name[:22], crit, idle, grow, txt, fw)
+            prev = old_items.pop(i, None)
+            if prev is not None:
+                if prev[0] == sig:
+                    new_items[i] = prev          # looks identical: keep it
+                    continue
+                c.delete(*prev[1])
             y = i * rh + rh / 2
-            if self._show_growth and name in self._growing:
-                c.create_text(4, y, text="↑", anchor="w", fill=ACCENT_WARN,
-                              font=self.f_mid, tags="row")
-            c.create_text(18, y, text=name[:22], anchor="w",
-                          fill=MUTED if idle else FG,
-                          font=self.f_mid, tags="row")
-            if bx1 > bx0 and not idle:     # idle rows drop the bar entirely
-                self._round_rect(c, bx0, y - 3, bx1, y + 3, 3, fill=TRACK,
-                                 outline="", tags="row")
-                fw = (bx1 - bx0) * val / maxv
+            ids = []
+            if grow:
+                ids.append(c.create_text(4, y, text="↑", anchor="w",
+                                         fill=ACCENT_WARN, font=self.f_mid,
+                                         tags="row"))
+            ids.append(c.create_text(18, y, text=name[:22], anchor="w",
+                                     fill=MUTED if idle else FG,
+                                     font=self.f_mid, tags="row"))
+            if fw >= 0:                    # idle rows drop the bar entirely
+                ids.append(self._round_rect(c, bx0, y - 3, bx1, y + 3, 3,
+                                            fill=TRACK, outline="", tags="row"))
                 if fw > 2:
-                    self._round_rect(c, bx0, y - 3, bx0 + fw, y + 3, 3,
-                                     fill=ACCENT, outline="", tags="row")
-            c.create_text(mbx, y, text=self._fmt_val(val), anchor="e",
-                          fill=GRID if idle else MUTED, font=self.f_mono,
-                          tags="row")
-            # critical rows show a lock, not a kill mark — they can't be ended
-            self._xitems[i] = c.create_text(
+                    ids.append(self._round_rect(c, bx0, y - 3, bx0 + fw, y + 3,
+                                                3, fill=ACCENT, outline="",
+                                                tags="row"))
+            ids.append(c.create_text(mbx, y, text=txt, anchor="e",
+                                     fill=GRID if idle else MUTED,
+                                     font=self.f_mono, tags="row"))
+            # critical rows show a lock, not a kill mark — they can't be
+            # ended. The mark is always the LAST item of a row (_xitems).
+            ids.append(c.create_text(
                 xx, y, text=chr(0xE72E) if crit else "✕", anchor="e",
                 fill=self._xcol(i, self._hover_xf),
-                font=self.f_icon if crit else self.f_mid, tags="row")
+                font=self.f_icon if crit else self.f_mid, tags="row"))
+            new_items[i] = (sig, ids)
+        for _sig, ids in old_items.values():  # scrolled out / list got shorter
+            c.delete(*ids)
+        self._row_items = new_items
+        self._xitems = {i: ids[-1] for i, (_s, ids) in new_items.items()}
         self._draw_hover_hl()
 
     # -- ending a process -------------------------------------------------- #
@@ -2745,8 +2879,7 @@ class App:
             pass
         if self.show_net:
             try:
-                self.net_rx, self.net_tx = net_rates(
-                    self.net_rx_sampler, self.net_tx_sampler)
+                self.net_rx, self.net_tx = net_rates(self.net_sampler)
             except Exception:
                 pass
         self.hist_net_rx.append(self.net_rx)
